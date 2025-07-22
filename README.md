@@ -10,9 +10,10 @@ Data analysis scripts are example python and R scripts used for relevant RSAP an
 3. RSAP Jurisdiction Intersection (Python script used for data that just need jurisdiction intersections, i.e. no exposure analysis)
 4. RSAP Jurisdiction Cleanup (Python script used to address city misspellings and ensure consistent formatting of jurisdiction fields)
 5. Multijurisdiction Analysis (Python script used to identify jurisdictions that overlap with common Operational Landscape Units and concatenate those values in a new field for city/CDP, county, and OLU boundary data, to facilitate multijurisdictional planning)
-6. CBO Directory City Analysis (Python script used to add city names to CBO Directory dataset)
-7. RSAP Housing and Jobs Parcel Analysis (R script to analysis housing and job spaces exposure to coastal flood hazards, using methodology developed by BCDC and MTC for the SLR Funding and Investment Strategy and adopted for use by the RSAP)
-8. RSAP Housing and Jobs Summaries (Python scripts used to summarize housing and jobs analaysis for city, county, OLU, and transportation analysis zone units)
+6. CBO Directory Jurisdiction Analysis (Python script used to add city, county, and OLU names to CBO Directory dataset)
+7. RSAP Planning Progress Excel to Web (Python script used to convert RSAP Planning Progress excel to spatial file for RSAP Atlas)
+8. RSAP Housing and Jobs Parcel Analysis (R script to analysis housing and job spaces exposure to coastal flood hazards, using methodology developed by BCDC and MTC for the SLR Funding and Investment Strategy and adopted for use by the RSAP)
+9. RSAP Housing and Jobs Summaries (Python scripts used to summarize housing and jobs analaysis for city, county, OLU, and transportation analysis zone units)
 
 Data outputs are available via the RSAP Open Data Portal https://rsap-open-data-bcdc.hub.arcgis.com/.
 

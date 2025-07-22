@@ -1,0 +1,317 @@
+---
+title: "RSAP Housing and Jobs Analysis (2024), Based on methods developed for the BCDC/MTC SLR Funding and Investment Framework"
+author: "Nicolas Sander, modified by Todd Hallenbeck"
+date: "May 1, 2024"
+output:
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: console
+  markdown:
+    wrap: 72
+---
+
+### SETUP
+#Script setup that needs to be run each time for other chunks to work as intended. Installs and loads libraries, creates a base plot theme and reads in general study area boundaries.
+
+```{r Library, message = F}
+knitr::opts_chunk$set(echo = TRUE)
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+remove(list = ls(all.names = TRUE))
+detachAllPackages <- function() {
+  basic.packages.blank <-  c("stats", 
+                             "graphics", 
+                             "grDevices", 
+                             "utils", 
+                             "datasets", 
+                             "methods", 
+                             "base")
+  basic.packages <- paste("package:", basic.packages.blank, sep = "")
+
+  package.list <- search()[ifelse(unlist(gregexpr("package:", search())) == 1, 
+                                  TRUE, 
+                                  FALSE)]
+
+  package.list <- setdiff(package.list, basic.packages)
+
+  if (length(package.list) > 0)  for (package in package.list) {
+    detach(package, character.only = TRUE)
+    print(paste("package ", package, " detached", sep = ""))
+  }
+}
+detachAllPackages()
+
+using<-function(...) {
+    libs<-unlist(list(...))
+    req<-unlist(lapply(libs,require,character.only=TRUE))
+    need<-libs[req==FALSE]
+    if(length(need)>0){ 
+        install.packages(need)
+        lapply(need,require,character.only=TRUE)
+    }
+}
+extrafont::loadfonts(device="win")
+using("tidyverse", "sf", "exactextractr", "raster", "httr", "tidycensus", "leaflet", "openxlsx", "readxl", "terra", "nngeo", "scales", "lwgeom", "cowplot", "extrafont")
+# to install the latest package for R 4.0 use the following command from R or RStudio:
+# install.packages("arcgisbinding", repos="https://r.esri.com", type="win.binary")
+arcgisbinding::arc.check_product()
+# prevent scientific notation
+options(scipen = 999)
+```
+
+```{r Plot Base Theme, echo = F}
+#define a colour for fonts
+textcol <- "#545454"
+
+theme_plot <- theme(
+        text = element_text(family = "Roboto Condensed", color="#545454", size=16),
+        plot.title = element_text(family="Roboto Condensed", color="#545454", size=18),
+        plot.subtitle = element_text(family="Roboto Condensed", color="#545454", size=12),
+        axis.text.x=element_text(size=12,colour=textcol,margin = unit(c(3, 0, 0, 0), "mm"), angle = 45, hjust = 1),
+        axis.title.x=element_text(size=12,colour=textcol,margin = unit(c(3, 0, 0, 0), "mm")),
+        axis.text.y=element_text(vjust=0.5,colour=textcol, size=12),
+        axis.ticks=element_line(size=0.4),
+        axis.title.y = element_text(size=12,colour=textcol),
+        plot.background = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank(),
+        #plot.margin = margin(0,0,0,0,"cm"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_line(colour="lightgrey", size=0.25))
+
+
+#Colour Palette
+pal <- c("grey90","#fee08b","#fdae61","#f46d43")
+```
+
+```{r Boundaries}
+# reading in several boundaries used for clipping and joining jurisdictional information to the dataset
+counties <- sf::st_read("Data\\Inputs\\Boundaries\\9BayArea_Counties_2016_NAD1983UTMZone10N.shp") %>% 
+  dplyr::rename(COUNTYNAME = NAME)
+cities <- sf::st_read("Data\\Inputs\\Boundaries\\9CountyBayArea_Places_2016_NAD1983UTMZone10N.shp") %>% 
+  dplyr::rename(CITYNAME = NAME)
+unincorporated <- sf::st_read("Data\\Inputs\\Boundaries\\unincorporated_cities_bayarea_2010\\ba_unincorp_cities.shp") %>%
+  dplyr::mutate(UNINCORP_CITYNAME = NAME) %>%
+  sf::st_transform(26910)
+outer_coast <- sf::st_read("Data\\Inputs\\Boundaries\\SLRFIF_Boundaries_BCDC_2023.gdb", layer = "OuterCoast") %>%
+  dplyr::mutate(Outer_Coast = "Yes") %>%
+  sf::st_transform(26910)
+delta_boundary <- sf::st_read("Data\\Inputs\\Boundaries\\SLRFIF_Boundaries_BCDC_2023.gdb", layer = "DeltaBoundary") %>%
+  dplyr::mutate(Delta_Boundary = "Yes") %>%
+  sf::st_transform(26910)
+olu <- sf::st_read("Data\\Inputs\\Boundaries\\SLRFIF_Boundaries_BCDC_2023.gdb", layer = "OLU_NAD83_Buffered") %>%
+  sf::st_transform(26910)
+```
+
+```{r Inflation Adjustment}
+# note blscrapeR not compatible with latest version of R - 
+#infladj <- blscrapeR::inflation_adjust(2022) %>%
+ # dplyr::mutate(year = as.integer(year))
+
+# # write Bureau of Labor Statistics Consumer Price Index inflation value table to .xslx
+# wb <- createWorkbook()
+# addWorksheet(wb, "CPI_2022")
+# openxlsx::writeData(wb, "CPI_2022", infladj, startRow = 1, startCol = 1)
+# openxlsx::saveWorkbook(wb, file = paste0(getwd(),"/Data/Outputs/Adaptation/BLS_CPI_2022.xlsx"), overwrite = TRUE)
+
+#read in manual xl
+infladj <- readxl::read_excel(paste0(getwd(),"/Data/Outputs/Adaptation/BLS_CPI_2022.xlsx"))
+```
+
+### HAZARD PARCEL ANALYSIS
+Hazard analysis of a Bay Area 9-County wide parcel data set with attached Microsoft Building Footprints using USGS and Delta Stewardship Council flood datasets.
+
+```{r Erase Census Area Water Areas from Parcel Polygons, eval = F}
+# This chunk erases areas from parcels that are fully in Census water areas so that they are not counted as inundated
+
+library(tidycensus)
+
+data(fips_codes)
+parcel_files <- fips_codes %>% filter(state == "CA") %>% filter((grepl(paste(unique(counties$NAME), collapse="|"), county)))
+parcel_files <- parcel_files %>% mutate(paths = list.files("Data\\Inputs\\Parcels\\Update2024\\Shapefiles\\", pattern = "\\.shp$", full.names = T))
+
+
+# Erase function for deleting polygon edges that reach into the water
+st_erase <- function(x, y) {
+  sf::st_difference(x, sf::st_union(y))
+}
+
+# Erase water from each County's parcel file
+start_time <- Sys.time()
+for(i in 1:nrow(parcel_files)){
+  parcels <- sf::st_read(parcel_files[i,]$paths) %>% sf::st_buffer(0) %>% sf::st_make_valid()
+  for(x in 1:length(parcel_files$county_code)){
+  parcels <- st_erase(parcels, tigris::area_water("CA", parcel_files[x,]$county_code, class= "sf", year = 2021) %>% st_transform(26910))
+  }
+  parcels <- parcels %>% sf::st_transform(26910) %>% sf::st_cast("MULTIPOLYGON")
+  sf::st_write(parcels,paste0(getwd(),"/Data/Inputs/Parcels/Update2024/Shapefiles/No_water/", gsub(" ", "_", parcel_files[i,]$county) ,"_no_water.shp"))
+}
+end_time <- Sys.time()
+end_time - start_time
+```
+
+```{r Single County, eval = F}
+# selecting a single county for the hazard raster extraction, as the entire Bay Area requires too much memory
+county_uc <- "Sonoma" 
+county_lc <- "Sonoma" #underscore between words
+```
+
+```{r Microsoft Building Footprints, eval = F}
+# reading in the Microsoft Building Footprint data based on the "Single" County selected
+mbf <- sf::st_read("Data\\Inputs\\MicrosoftBuildingFootprints\\MicrosoftBuildingFootprints_BayArea.gdb")
+mbf_county <- sf::st_intersection(mbf, counties %>% filter(COUNTYNAME == county_uc)) #change single county name, case sensitive
+mbf_county$totarea <- sf::st_area(mbf_county)
+mbf_county$id <- seq.int(nrow(mbf_county))
+mbf_county <- mbf_county %>% sf::st_cast("MULTIPOLYGON")
+```
+
+```{r County Parcel Polygons, eval = F}
+# reading in the parcel data based on the "Single" County selected
+parcels_county <- sf::st_read(paste0("Data\\Inputs\\Parcels\\Update2024\\No_water\\", county_lc,"_County_no_water.shp")) 
+#parcels_county <- parcels_county %>% filter(pa_county == county_uc)
+parcels_county$totarea <- sf::st_area(parcels_county)
+```
+
+```{r Read RSAP HAzard Rasters, eval = F}
+# read rasters and stack them for hazard analysis
+
+county_name <- county_uc
+
+img <- list.files(paste0("Data\\Inputs\\RSAP_Hazards\\Rasters\\",county_name), pattern = 'tif$', full.names=TRUE) # the $ excludes aux-files
+slr_stack <- c(terra::rast(img))
+names(slr_stack)<-c('1p0', '3p0', '4p3', '6p4')
+```
+
+```{r SLR Zonal Statistics with Hazard Rasters, eval = F}
+###for microsoft building footprints
+start_time <- Sys.time()
+ex_mbf <- exactextractr::exact_extract(slr_stack, mbf_county, c('count'), coverage_area = T, stack_apply = T, full_colnames = T, force_df = T)
+end_time <- Sys.time()
+end_time - start_time
+
+###for parcels
+start_time <- Sys.time()
+ex_parcels <- exactextractr::exact_extract(slr_stack, parcels_county, c('count'), coverage_area = T, stack_apply = T, full_colnames = T, force_df = T) 
+end_time <- Sys.time()
+end_time - start_time
+
+ex_mbf <- ex_mbf %>% rename(mbf_count_1p0 = count.1p0,
+                            mbf_count_3p0 = count.3p0,
+                            mbf_count_4p3 = count.4p3,
+                            mbf_count_6p4 = count.6p4)
+
+ex_parcels <- ex_parcels %>% rename(parcels_count_1p0 = count.1p0,
+                                    parcels_count_3p0 = count.3p0,
+                                    parcels_count_4p3 = count.4p3,
+                                    parcels_count_6p4 = count.6p4)
+
+
+mbf_county_ex <- bind_cols(mbf_county, ex_mbf)
+parcels_county_ex <- bind_cols(parcels_county, ex_parcels)
+
+parcels_county_mbf_ex <- sf::st_join(parcels_county_ex, mbf_county_ex %>% dplyr::select(-c(release, capture_da, Shape_Leng, Shape_Area, totarea)))
+
+parcels_county_mbf_ex <- parcels_county_mbf_ex %>% mutate(across(contains('parcels_count'), 
+                                                                 .fns = list(percent_parcel_area_flooded = ~(./as.vector(totarea) * 100)),
+                                                                 .names = "{paste0({fn},'_',str_extract({col},'[0-9][a-z][0-9]'))}"))
+
+parcels_county_mbf_ex <- parcels_county_mbf_ex %>% group_by(PARCEL_ID) %>% mutate(total_buildings = sum(+!is.na(STATEFP)), # = total number of individual MBF added to parcel
+                                                                                  across(contains('mbf_count'),
+                                                                                         .fns = list(flooded_buildings = ~sum(.x > 0, na.rm = T)), # = sum of all buildings within same parcel that have flooding
+                                                                                         .names = "{paste0({fn},'_',str_extract({col},'[0-9][a-z][0-9]'))}"),
+                                                                                  across(contains('flooded_buildings'),
+                                                                                         .fns = list(percent_total_buildings_flooded = ~(ifelse(total_buildings != 0, ./total_buildings * 100, 0))), # = ratio of flooded buildings to total number of buildings, if total buildings is not 0.
+                                                                                         .names = "{paste0({fn},'_',str_extract({col},'[0-9][a-z][0-9]'))}")) %>% ungroup()
+
+
+parcel_buildings <- parcels_county_mbf_ex %>% sf::st_drop_geometry() %>% distinct(PARCEL_ID, .keep_all = TRUE) %>% dplyr::select(matches("parcel|fldpdepth|flooded|total"))
+parcels_final <- dplyr::left_join(parcels_county, parcel_buildings, by = "PARCEL_ID") %>% st_cast("MULTIPOLYGON")
+
+##Output
+sf::st_write(parcels_final, paste0(getwd(),"/Data/Outputs/Flooding/", paste0("parcels_",county_name,"_terra.gpkg")), append=FALSE)
+```
+
+```{r Combining county parcel and building analysis for region, eval = F}
+img <- list.files("Data/Outputs/Flooding/County/", "_terra", full.names=TRUE)
+
+# Read each gpkg and return a list of sf objects
+img <- lapply(img, st_read)
+
+# Look to make sure they're all in the same CRS
+unique(sapply(img, crs))
+
+# Combine the list of sf objects into a single object
+parcels <- do.call(what = sf:::rbind.sf, args=img)
+
+#Join land value data from MTC parcel analysis
+parcel_values <- sf::st_read(paste0(getwd(),"/Data/Inputs/Parcels/Geopackages/parcels_21122022.gpkg"))
+parcels<- sf::st_join(parcels, parcel_values %>% dplyr::select(c(zn_regional_description, land_value, impr_value, value))) %>% rename(land_value_adjusted = land_value, impr_value_adjusted = impr_value, value_adjusted = value)
+
+#join business data
+business <- sf::st_read(paste0(getwd(),"/Data/Inputs/MTC/BayAreaBusinessListings2021/", paste0("by_parcels_business_data.gpkg")))
+parcels <- dplyr::left_join(parcels, business %>% sf::st_drop_geometry())
+
+#join community vulnerability data
+community_vulnerability <- sf::st_read(paste0(getwd(),"/Data/Inputs/BCDC/CommunityVulnerability/CommunityVulnerability_BCDC_2023_FINAL.gdb"))
+parcels <- sf::st_join(parcels, community_vulnerability %>% dplyr::select(c(ind_70pct, ind_90pct, socVulnRank, contamVulnRank, combined_vulnerability))) 
+
+#cleanup combined parcel file
+parcels <- parcels %>% dplyr::select(-contains(c('.y'))) %>% rename(Job_Spaces_2010 = total_job_.x, Residential_Units_2010 = residentia, Households_2010 = tothh, Job_Spaces_2050 = total_job1.x, Residential_Units_2050 = resident_1, Households_2050 = tothh_1) #removing .y files from messy join previously which could be address earlier
+
+#remove variables from memory, if needed
+rm(business, parcel_values, community_vulnerability, img)
+gc(business, parcel_values, community_vulnerability, img)
+
+#make geometry valid
+parcels <- sf::st_make_valid(parcels)
+
+#complete regional parcels layer output, gdb would also be fine
+sf::st_write(parcels, paste0(getwd(),"/Data/Outputs/Flooding/Regional/parcels_complete.gpkg"), append=FALSE, delete_layer = T)
+```
+
+```{r splitting complete parcel data by RSAP planning scenario, eval = F}
+#SLR 1p0ft scenario
+parcels_1p0ft <- parcels_complete %>% dplyr::select(-contains(c('3p0','4p3','6p4'))) %>% rename(flooded_area = parcels_count_1p0, percent_parcel_area_flooded = percent_parcel_area_flooded_1p0, total_buildings = total_buildings, flooded_buildings = flooded_buildings_1p0, percent_total_buildings_flooded = percent_total_buildings_flooded_1p0)
+sf::st_write(parcels_1p0ft, paste0(getwd(),"/Data/Outputs/Flooding/", paste0("parcels_complete_1p0ft.gpkg")))
+
+#SLR 3p0ft scenario
+parcels_3p0ft <- parcels_complete %>% dplyr::select(-contains(c('1p0','4p3','6p4'))) %>% rename(flooded_area = parcels_count_3p0, percent_parcel_area_flooded = percent_parcel_area_flooded_3p0, total_buildings = total_buildings, flooded_buildings = flooded_buildings_3p0, percent_total_buildings_flooded = percent_total_buildings_flooded_3p0)
+sf::st_write(parcels_3p0ft, paste0(getwd(),"/Data/Outputs/Flooding/", paste0("parcels_complete_3p0ft.gpkg")))
+
+#SLR 4p3ft scenario
+parcels_4p3ft <- parcels_complete %>% dplyr::select(-contains(c('1p0','3p0','6p4'))) %>% rename(flooded_area = parcels_count_4p3, percent_parcel_area_flooded = percent_parcel_area_flooded_4p3, total_buildings = total_buildings, flooded_buildings = flooded_buildings_4p3, percent_total_buildings_flooded = percent_total_buildings_flooded_4p3)
+sf::st_write(parcels_4p3ft, paste0(getwd(),"/Data/Outputs/Flooding/", paste0("parcels_complete_4p3ft.gpkg")))
+
+#SLR 6p4ft scenario
+parcels_6p4ft <- parcels_complete %>% dplyr::select(-contains(c('1p0','3p0','4p3'))) %>% rename(flooded_area = parcels_count_6p4, percent_parcel_area_flooded = percent_parcel_area_flooded_6p4, total_buildings = total_buildings, flooded_buildings = flooded_buildings_6p4, percent_total_buildings_flooded = percent_total_buildings_flooded_6p4)
+sf::st_write(parcels_6p4ft, paste0(getwd(),"/Data/Outputs/Flooding/", paste0("parcels_complete_6p4ft.gpkg")))
+```
+
+```{r Cost of Inaction, eval = F}
+#TH NEED TO UPDATE THIS SECTION 
+#Summarizing inundated parcel value by County and Social Vulnerability
+#Summarizing business data by County and Social Vulnerability
+dir <- "Data\\Inputs\\Parcels\\Geopackages\\DecemberUpdate\\"
+parcel_paths <- list.files(dir, pattern = ".gpkg")
+parcels <- do.call(rbind, lapply(parcel_paths, function(x) sf::st_read(paste0(dir,x))))
+business <- sf::st_read(paste0(getwd(),"/Data/Inputs/MTC/BayAreaBusinessListings2021/", paste0("by_parcels_business_data.gpkg")))
+parcels <- dplyr::left_join(parcels, business %>% sf::st_drop_geometry())
+parcels <- parcels %>% rename(land_value_adjusted = land_value, impr_value_adjusted = impr_value, value_adjusted = value)
+parcels_combined <- dplyr::left_join(parcels, parcels_original %>% sf::st_drop_geometry() %>% dplyr::select(c(parcel_id, land_value, impr_value, value)), by = "parcel_id")
+sf::st_write(sf::st_make_valid(parcels_combined), paste0(getwd(),"/Data/Inputs/Parcels/Geopackages/", "parcels_21122022.gpkg"), delete_layer = T)
+
+
+output <- parcels_combined %>% dplyr::mutate(adjusted_value = value * percent_parcel_area_flooded_slr150/100) %>% sf::st_drop_geometry() %>% dplyr::group_by(pa_county, socVulnRan, flooded) %>% dplyr::summarize(parcels = n(), sum_value = sum(value, na.rm = T),  total_num_business = sum(tot_num_businesses, na.rm = T), total_salesvol = sum(salesvol, na.rm = T))
+output <- output %>% dplyr::mutate(socVulnRan = factor(socVulnRan, levels = c(NA, "Not Calculated", "Low social vulnerability", "Moderate social vulnerability", "High social vulnerability", "Highest social vulnerability")))
+
+output_commas <- output %>% 
+  mutate(across(parcels:total_salesvol, ~ format(., big.mark = ",", scientific = F)))
+
+output_commas_region <- output %>% group_by(flooded) %>% dplyr::summarize(sum_value = sum(sum_value, na.rm = T), sum_num_businesses = sum(total_num_business, na.rm = T), total_salesvol = sum(total_salesvol, na.rm = T) ) %>% mutate(across(sum_value:total_salesvol, ~ format(., big.mark = ",", scientific = F)))
+
+ggplot(output, aes(x = pa_county, y = sum_value , fill = socVulnRan)) + geom_bar(stat = "identity", position = "dodge2") +  scale_fill_brewer(palette = "Reds")+ facet_wrap(~ flooded)
+#once data uploaded add group_by(community vulnerability status), summarize number of business, eployees and total revenue
+```
